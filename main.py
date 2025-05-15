@@ -28,8 +28,10 @@ import urllib.request
 import urllib.parse
 
 from skimage import transform
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import joblib
 
 import speech_recognition as sr
@@ -209,64 +211,77 @@ def capture():
 
 @app.route('/classify', methods=['GET', 'POST'])
 def classify():
-    msg=""
+    msg = ""
     mycursor = mydb.cursor()
     mycursor.execute("SELECT * FROM ga_gesture")
     data = mycursor.fetchall()
 
-    dt=[]
-    dt2=[]
+    dt, dt2 = [], []
     for dc in data:
         dt.append(dc[1])
-        d1=dc[2].split(".")
-        dt2.append(d1[0])
-        
-    cname="|".join(dt)
-    cname2="|".join(dt2)
-    ff=open("static/class1.txt","w")
-    ff.write(cname)
-    ff.close()
+        dt2.append(dc[2].split(".")[0])
 
-    ff=open("static/class2.txt","w")
-    ff.write(cname2)
-    ff.close()
-    
-    #build model
+    with open("static/class1.txt", "w") as f:
+        f.write("|".join(dt))
+    with open("static/class2.txt", "w") as f:
+        f.write("|".join(dt2))
+
+    # Load gesture data
     DATA_DIR = "static/hand_gesture_data"
+    data, labels, gesture_map = [], [], {}
 
-    # Load data
-    data = []
-    labels = []
-    gesture_map = {}  # Label mapping
-
-    for idx, file in enumerate(os.listdir(DATA_DIR)):
+    for idx, file in enumerate(sorted(os.listdir(DATA_DIR))):
         gesture_name = file.split(".")[0]
-        gesture_map[idx] = gesture_name  # Store label mapping
+        gesture_map[idx] = gesture_name
 
         file_path = os.path.join(DATA_DIR, file)
-        df = pd.read_csv(file_path, header=None)
+        df = pd.read_csv(file_path, header=None).dropna()
         data.extend(df.values)
         labels.extend([idx] * len(df))
 
-    # Convert to numpy array
+    # Convert to numpy
     X = np.array(data)
     y = np.array(labels)
 
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # Normalize features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
 
-    # Train classifier
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
+    # Split dataset (stratified to preserve class balance)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_scaled, y, test_size=0.2, stratify=y, random_state=42
+    )
 
-    # Save model and gesture mapping
+    # Hyperparameter tuning (optional - use carefully)
+    param_grid = {
+        'n_estimators': [100, 150],
+        'max_depth': [None, 20, 30],
+        'min_samples_split': [2, 5],
+        'min_samples_leaf': [1, 2],
+        'bootstrap': [True, False]
+    }
+
+    grid_search = GridSearchCV(RandomForestClassifier(random_state=42),
+                               param_grid, cv=3, scoring='accuracy', n_jobs=-1)
+    grid_search.fit(X_train, y_train)
+
+    model = grid_search.best_estimator_
+
+    # Evaluate
+    y_pred = model.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    print(f"Model trained with accuracy: {acc * 100:.2f}%")
+    print("Classification Report:")
+    print(classification_report(y_test, y_pred, target_names=gesture_map.values()))
+    print("Confusion Matrix:")
+    print(confusion_matrix(y_test, y_pred))
+
+    # Save model, scaler, and label map
     joblib.dump(model, "gesture_model.pkl")
     joblib.dump(gesture_map, "gesture_map.pkl")
+    joblib.dump(scaler, "gesture_scaler.pkl")
 
-    print(f"Model trained with accuracy: {model.score(X_test, y_test) * 100:.2f}%")
-
-    return render_template('classify.html',msg=msg,data=data)
-
+    return render_template('classify.html', msg=msg, data=data)
 
 
 @app.route('/upload', methods=['GET', 'POST'])
